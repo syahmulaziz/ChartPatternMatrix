@@ -1,0 +1,2472 @@
+//@version=6
+indicator("MTF Pattern Matrix v1.0",shorttitle = "Pat Matrix",overlay = true,max_labels_count = 50)
+
+// ============================================================================
+// MTF PATTERN MATRIX v1.0
+// Multi-Timeframe Chart Pattern Detection + Confluence Engine
+// ============================================================================
+
+
+// ============================================================================
+// INPUT GROUPS
+// ============================================================================
+
+string GRP_TF      = "① Timeframes"
+string GRP_ENGINE  = "② Pattern Engine"
+string GRP_PATTERN = "③ Pattern Types"
+string GRP_SIGNAL  = "④ Confluence"
+string GRP_DISPLAY = "⑤ Display"
+
+
+// ============================================================================
+// TIMEFRAMES
+// ============================================================================
+
+string tf1 = input.timeframe(
+     "5",
+     "Timeframe 1",
+     group = GRP_TF
+ )
+
+string tf2 = input.timeframe(
+     "30",
+     "Timeframe 2",
+     group = GRP_TF
+ )
+
+string tf3 = input.timeframe(
+     "240",
+     "Timeframe 3",
+     group = GRP_TF
+ )
+
+bool confirmedOnly = input.bool(
+     true,
+     "Confirmed source candles only",
+     tooltip =
+         "ON = Uses completed source-timeframe candles. "
+       + "This greatly reduces repainting, but signals arrive after the "
+       + "source timeframe candle closes.",
+     group = GRP_TF
+ )
+
+
+// ============================================================================
+// PATTERN ENGINE
+// ============================================================================
+
+int pivotLen = input.int(
+     5,
+     "Pivot strength",
+     minval = 2,
+     maxval = 20,
+     group = GRP_ENGINE
+ )
+
+float toleranceInput = input.float(
+     0.35,
+     "Structure tolerance (%)",
+     minval = 0.05,
+     maxval = 5.0,
+     step = 0.05,
+     tooltip =
+         "Maximum price difference used when comparing approximately "
+       + "equal highs, lows, shoulders, support and resistance.",
+     group = GRP_ENGINE
+ )
+
+float tolerance = toleranceInput / 100.0
+
+int minPatternBars = input.int(
+     5,
+     "Minimum pattern width",
+     minval = 2,
+     maxval = 100,
+     group = GRP_ENGINE
+ )
+
+int maxPatternBars = input.int(
+     150,
+     "Maximum pattern width",
+     minval = 20,
+     maxval = 500,
+     group = GRP_ENGINE
+ )
+
+int flagBars = input.int(
+     8,
+     "Flag consolidation length",
+     minval = 3,
+     maxval = 30,
+     group = GRP_ENGINE
+ )
+
+int impulseBars = input.int(
+     12,
+     "Flag impulse length",
+     minval = 5,
+     maxval = 50,
+     group = GRP_ENGINE
+ )
+
+float impulseATR = input.float(
+     2.0,
+     "Minimum impulse ATR",
+     minval = 0.5,
+     maxval = 10.0,
+     step = 0.25,
+     group = GRP_ENGINE
+ )
+
+
+// ============================================================================
+// PATTERN TYPES
+// ============================================================================
+
+bool detectReversals = input.bool(
+     true,
+     "Double Top/Bottom + H&S",
+     group = GRP_PATTERN
+ )
+
+bool detectTriangles = input.bool(
+     true,
+     "Triangles",
+     group = GRP_PATTERN
+ )
+
+bool detectWedges = input.bool(
+     true,
+     "Wedges",
+     group = GRP_PATTERN
+ )
+
+bool detectFlags = input.bool(
+     true,
+     "Flags + Pennants",
+     group = GRP_PATTERN
+ )
+
+bool detectChannels = input.bool(
+     true,
+     "Channels + Rectangles",
+     group = GRP_PATTERN
+ )
+
+
+// ============================================================================
+// CONFLUENCE
+// ============================================================================
+
+float minimumScore = input.float(
+     65,
+     "Minimum pattern quality",
+     minval = 0,
+     maxval = 100,
+     step = 1,
+     group = GRP_SIGNAL
+ )
+
+int minimumAgreement = input.int(
+     2,
+     "Minimum TF agreement",
+     minval = 2,
+     maxval = 3,
+     group = GRP_SIGNAL
+ )
+
+string confluenceMode = input.string(
+     "Forming + confirmed",
+     "Patterns used for confluence",
+     options = [
+         "Confirmed only",
+         "Forming + confirmed"
+     ],
+     group = GRP_SIGNAL
+ )
+
+
+// ============================================================================
+// DISPLAY
+// ============================================================================
+
+bool showDashboard = input.bool(
+     true,
+     "Show MTF dashboard",
+     group = GRP_DISPLAY
+ )
+
+bool showLabels = input.bool(
+     true,
+     "Show live pattern labels",
+     group = GRP_DISPLAY
+ )
+
+bool showSignals = input.bool(
+     true,
+     "Show MTF confluence signals",
+     group = GRP_DISPLAY
+ )
+
+bool highlightConfluence = input.bool(
+     false,
+     "Highlight confluence background",
+     group = GRP_DISPLAY
+ )
+
+
+// ============================================================================
+// SAFETY CHECK
+// request.security() is intended here for chart TF or HIGHER TFs.
+// ============================================================================
+
+if barstate.isfirst
+    int chartSeconds = timeframe.in_seconds()
+
+    if timeframe.in_seconds(tf1) < chartSeconds
+        runtime.error("Timeframe 1 must be equal to or higher than chart timeframe.")
+
+    if timeframe.in_seconds(tf2) < chartSeconds
+        runtime.error("Timeframe 2 must be equal to or higher than chart timeframe.")
+
+    if timeframe.in_seconds(tf3) < chartSeconds
+        runtime.error("Timeframe 3 must be equal to or higher than chart timeframe.")
+
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+
+// Compare two prices and return similarity from 0 - 100.
+
+f_similarity(float a, float b, float tol) =>
+
+    float avgPrice =
+         (math.abs(a) + math.abs(b)) / 2.0
+
+    float difference =
+         avgPrice > 0
+         ? math.abs(a - b) / avgPrice
+         : 1.0
+
+    float result =
+         math.max(
+             0.0,
+             100.0 * (1.0 - difference / tol)
+         )
+
+    result
+
+
+// Compare two trendline slopes.
+// 1.0 = perfectly parallel.
+
+f_parallel(float slope1, float slope2) =>
+
+    float a = math.abs(slope1)
+    float b = math.abs(slope2)
+
+    float biggest = math.max(a, b)
+
+    biggest > 0
+         ? math.min(a, b) / biggest
+         : 0.0
+
+
+// Locate a pivot value occurring between two bar indices.
+
+f_between4(
+     float v0,
+     int b0,
+     float v1,
+     int b1,
+     float v2,
+     int b2,
+     float v3,
+     int b3,
+     int olderBar,
+     int newerBar
+ ) =>
+
+    float result = na
+
+    if not na(b0) and b0 > olderBar and b0 < newerBar
+        result := v0
+
+    else if not na(b1) and b1 > olderBar and b1 < newerBar
+        result := v1
+
+    else if not na(b2) and b2 > olderBar and b2 < newerBar
+        result := v2
+
+    else if not na(b3) and b3 > olderBar and b3 < newerBar
+        result := v3
+
+    result
+
+
+// ============================================================================
+// PATTERN NAME
+// ============================================================================
+
+f_patternName(int code) =>
+
+    switch code
+
+        1  => "Double Top"
+        2  => "Double Bottom"
+
+        3  => "Head & Shoulders"
+        4  => "Inverse H&S"
+
+        5  => "Ascending Triangle"
+        6  => "Descending Triangle"
+        7  => "Symmetrical Triangle"
+
+        8  => "Rising Wedge"
+        9  => "Falling Wedge"
+
+        10 => "Bull Flag"
+        11 => "Bear Flag"
+
+        12 => "Bull Pennant"
+        13 => "Bear Pennant"
+
+        14 => "Rectangle"
+
+        15 => "Rising Channel"
+        16 => "Falling Channel"
+
+        => "None"
+
+
+f_biasText(int bias) =>
+
+    switch bias
+
+        1  => "BULLISH"
+        -1 => "BEARISH"
+
+        => "NEUTRAL"
+
+
+f_stateText(int state) =>
+
+    switch state
+
+        1 => "FORMING"
+        2 => "CONFIRMED"
+
+        => "-"
+
+
+f_biasIcon(int bias) =>
+
+    switch bias
+
+        1  => "▲"
+        -1 => "▼"
+
+        => "◆"
+
+
+f_biasColor(int bias) =>
+
+    switch bias
+
+        1  => color.new(color.green, 0)
+        -1 => color.new(color.red, 0)
+
+        => color.new(color.orange, 0)
+
+
+// ============================================================================
+// CORE PATTERN DETECTOR
+//
+// RETURNS:
+//
+// [patternCode, bias, score, state]
+//
+// Bias:
+// +1 bullish
+// -1 bearish
+//  0 neutral
+//
+// State:
+// 1 forming
+// 2 confirmed breakout
+// ============================================================================
+
+f_detect(int sourceOffset) =>
+
+    // ------------------------------------------------------------------------
+    // Confirmed swing structure
+    // ------------------------------------------------------------------------
+
+    float ph =
+         ta.pivothigh(
+             high,
+             pivotLen,
+             pivotLen
+         )
+
+    float pl =
+         ta.pivotlow(
+             low,
+             pivotLen,
+             pivotLen
+         )
+
+
+    // ------------------------------------------------------------------------
+    // Recent pivot highs
+    // ------------------------------------------------------------------------
+
+    float h0 =
+         ta.valuewhen(not na(ph), ph, 0)[sourceOffset]
+
+    float h1 =
+         ta.valuewhen(not na(ph), ph, 1)[sourceOffset]
+
+    float h2 =
+         ta.valuewhen(not na(ph), ph, 2)[sourceOffset]
+
+    float h3 =
+         ta.valuewhen(not na(ph), ph, 3)[sourceOffset]
+
+
+    int hb0 =
+         ta.valuewhen(
+             not na(ph),
+             bar_index - pivotLen,
+             0
+         )[sourceOffset]
+
+    int hb1 =
+         ta.valuewhen(
+             not na(ph),
+             bar_index - pivotLen,
+             1
+         )[sourceOffset]
+
+    int hb2 =
+         ta.valuewhen(
+             not na(ph),
+             bar_index - pivotLen,
+             2
+         )[sourceOffset]
+
+    int hb3 =
+         ta.valuewhen(
+             not na(ph),
+             bar_index - pivotLen,
+             3
+         )[sourceOffset]
+
+
+    // ------------------------------------------------------------------------
+    // Recent pivot lows
+    // ------------------------------------------------------------------------
+
+    float l0 =
+         ta.valuewhen(not na(pl), pl, 0)[sourceOffset]
+
+    float l1 =
+         ta.valuewhen(not na(pl), pl, 1)[sourceOffset]
+
+    float l2 =
+         ta.valuewhen(not na(pl), pl, 2)[sourceOffset]
+
+    float l3 =
+         ta.valuewhen(not na(pl), pl, 3)[sourceOffset]
+
+
+    int lb0 =
+         ta.valuewhen(
+             not na(pl),
+             bar_index - pivotLen,
+             0
+         )[sourceOffset]
+
+    int lb1 =
+         ta.valuewhen(
+             not na(pl),
+             bar_index - pivotLen,
+             1
+         )[sourceOffset]
+
+    int lb2 =
+         ta.valuewhen(
+             not na(pl),
+             bar_index - pivotLen,
+             2
+         )[sourceOffset]
+
+    int lb3 =
+         ta.valuewhen(
+             not na(pl),
+             bar_index - pivotLen,
+             3
+         )[sourceOffset]
+
+
+    float c =
+         close[sourceOffset]
+
+    float atr =
+         ta.atr(14)[sourceOffset]
+
+
+    // ------------------------------------------------------------------------
+    // Output defaults
+    // ------------------------------------------------------------------------
+
+    int patternCode = 0
+    int patternBias = 0
+
+    float patternScore = 0.0
+
+    int patternState = 0
+
+
+    // ========================================================================
+    // STRUCTURE METRICS
+    // ========================================================================
+
+    bool haveHighs =
+         not na(h0)
+         and not na(h1)
+         and not na(h2)
+
+    bool haveLows =
+         not na(l0)
+         and not na(l1)
+         and not na(l2)
+
+    bool haveStructure =
+         haveHighs
+         and haveLows
+
+
+    // ------------------------------------------------------------------------
+    // High slope
+    // ------------------------------------------------------------------------
+
+    float highSlope =
+
+         haveHighs
+         and hb0 != hb2
+
+         ? (h0 - h2) /
+           float(hb0 - hb2)
+
+         : na
+
+
+    // ------------------------------------------------------------------------
+    // Low slope
+    // ------------------------------------------------------------------------
+
+    float lowSlope =
+
+         haveLows
+         and lb0 != lb2
+
+         ? (l0 - l2) /
+           float(lb0 - lb2)
+
+         : na
+
+
+    float parallelScore =
+
+         not na(highSlope)
+         and not na(lowSlope)
+
+         ? f_parallel(
+             highSlope,
+             lowSlope
+         )
+
+         : 0.0
+
+
+    // ------------------------------------------------------------------------
+    // Trend structure
+    // ------------------------------------------------------------------------
+
+    bool highsFalling =
+         haveHighs
+         and h0 < h1
+         and h1 < h2
+
+    bool highsRising =
+         haveHighs
+         and h0 > h1
+         and h1 > h2
+
+    bool lowsRising =
+         haveLows
+         and l0 > l1
+         and l1 > l2
+
+    bool lowsFalling =
+         haveLows
+         and l0 < l1
+         and l1 < l2
+
+
+    // ------------------------------------------------------------------------
+    // Flat levels
+    // ------------------------------------------------------------------------
+
+    bool highsFlat =
+
+         haveHighs
+
+         and f_similarity(
+             h0,
+             h1,
+             tolerance
+         ) > 0
+
+         and f_similarity(
+             h1,
+             h2,
+             tolerance
+         ) > 0
+
+
+    bool lowsFlat =
+
+         haveLows
+
+         and f_similarity(
+             l0,
+             l1,
+             tolerance
+         ) > 0
+
+         and f_similarity(
+             l1,
+             l2,
+             tolerance
+         ) > 0
+
+
+    // ------------------------------------------------------------------------
+    // Current / previous structural range
+    // ------------------------------------------------------------------------
+
+    float currentRange =
+         haveStructure
+         ? h0 - l0
+         : na
+
+    float oldRange =
+         haveStructure
+         ? h2 - l2
+         : na
+
+
+    bool compression =
+
+         haveStructure
+         and currentRange > 0
+         and oldRange > 0
+         and currentRange < oldRange
+
+
+    // ========================================================================
+    // 1. DOUBLE TOP
+    // ========================================================================
+
+    if detectReversals and not na(h1)
+
+        int width =
+             hb0 - hb1
+
+        float neckline =
+             f_between4(
+                 l0, lb0,
+                 l1, lb1,
+                 l2, lb2,
+                 l3, lb3,
+                 hb1,
+                 hb0
+             )
+
+        float similarity =
+             f_similarity(
+                 h0,
+                 h1,
+                 tolerance
+             )
+
+        bool structure =
+
+             width >= minPatternBars
+             and width <= maxPatternBars
+
+             and similarity > 0
+
+             and not na(neckline)
+
+
+        if structure
+
+            float depth =
+                 ((h0 + h1) / 2.0) - neckline
+
+            bool enoughDepth =
+                 depth > atr * 0.40
+
+            if enoughDepth
+
+                float candidate =
+                     68.0 +
+                     similarity * 0.25
+
+                candidate :=
+                     math.min(
+                         candidate,
+                         95.0
+                     )
+
+                if candidate > patternScore
+
+                    patternCode := 1
+                    patternBias := -1
+                    patternScore := candidate
+
+                    patternState :=
+                         c < neckline
+                         ? 2
+                         : 1
+
+
+    // ========================================================================
+    // 2. DOUBLE BOTTOM
+    // ========================================================================
+
+    if detectReversals and not na(l1)
+
+        int width =
+             lb0 - lb1
+
+        float resistance =
+             f_between4(
+                 h0, hb0,
+                 h1, hb1,
+                 h2, hb2,
+                 h3, hb3,
+                 lb1,
+                 lb0
+             )
+
+        float similarity =
+             f_similarity(
+                 l0,
+                 l1,
+                 tolerance
+             )
+
+        bool structure =
+
+             width >= minPatternBars
+             and width <= maxPatternBars
+
+             and similarity > 0
+
+             and not na(resistance)
+
+
+        if structure
+
+            float height =
+                 resistance -
+                 ((l0 + l1) / 2.0)
+
+            bool enoughHeight =
+                 height > atr * 0.40
+
+            if enoughHeight
+
+                float candidate =
+                     68.0 +
+                     similarity * 0.25
+
+                candidate :=
+                     math.min(
+                         candidate,
+                         95.0
+                     )
+
+                if candidate > patternScore
+
+                    patternCode := 2
+                    patternBias := 1
+                    patternScore := candidate
+
+                    patternState :=
+                         c > resistance
+                         ? 2
+                         : 1
+
+
+    // ========================================================================
+    // 3. HEAD & SHOULDERS
+    // ========================================================================
+
+    if detectReversals and haveHighs
+
+        int totalWidth =
+             hb0 - hb2
+
+        float leftNeck =
+             f_between4(
+                 l0, lb0,
+                 l1, lb1,
+                 l2, lb2,
+                 l3, lb3,
+                 hb2,
+                 hb1
+             )
+
+        float rightNeck =
+             f_between4(
+                 l0, lb0,
+                 l1, lb1,
+                 l2, lb2,
+                 l3, lb3,
+                 hb1,
+                 hb0
+             )
+
+        float shoulderSimilarity =
+             f_similarity(
+                 h0,
+                 h2,
+                 tolerance * 1.5
+             )
+
+        bool headHigher =
+
+             h1 > h0
+             and h1 > h2
+
+             and (
+                 h1 - math.max(h0, h2)
+             ) > atr * 0.25
+
+
+        bool validWidth =
+
+             totalWidth >= minPatternBars * 2
+             and totalWidth <= maxPatternBars
+
+
+        bool structure =
+
+             headHigher
+             and shoulderSimilarity > 0
+             and validWidth
+             and not na(leftNeck)
+             and not na(rightNeck)
+
+
+        if structure
+
+            float neckSimilarity =
+                 f_similarity(
+                     leftNeck,
+                     rightNeck,
+                     tolerance * 2.5
+                 )
+
+            float neckline =
+                 (
+                     leftNeck +
+                     rightNeck
+                 ) / 2.0
+
+
+            float candidate =
+                 68.0
+                 + shoulderSimilarity * 0.18
+                 + neckSimilarity * 0.08
+
+            candidate :=
+                 math.min(
+                     candidate,
+                     98.0
+                 )
+
+
+            if candidate > patternScore
+
+                patternCode := 3
+                patternBias := -1
+                patternScore := candidate
+
+                patternState :=
+                     c < neckline
+                     ? 2
+                     : 1
+
+
+    // ========================================================================
+    // 4. INVERSE HEAD & SHOULDERS
+    // ========================================================================
+
+    if detectReversals and haveLows
+
+        int totalWidth =
+             lb0 - lb2
+
+        float leftNeck =
+             f_between4(
+                 h0, hb0,
+                 h1, hb1,
+                 h2, hb2,
+                 h3, hb3,
+                 lb2,
+                 lb1
+             )
+
+        float rightNeck =
+             f_between4(
+                 h0, hb0,
+                 h1, hb1,
+                 h2, hb2,
+                 h3, hb3,
+                 lb1,
+                 lb0
+             )
+
+        float shoulderSimilarity =
+             f_similarity(
+                 l0,
+                 l2,
+                 tolerance * 1.5
+             )
+
+        bool headLower =
+
+             l1 < l0
+             and l1 < l2
+
+             and (
+                 math.min(l0, l2) - l1
+             ) > atr * 0.25
+
+
+        bool validWidth =
+
+             totalWidth >= minPatternBars * 2
+             and totalWidth <= maxPatternBars
+
+
+        bool structure =
+
+             headLower
+             and shoulderSimilarity > 0
+             and validWidth
+             and not na(leftNeck)
+             and not na(rightNeck)
+
+
+        if structure
+
+            float neckSimilarity =
+                 f_similarity(
+                     leftNeck,
+                     rightNeck,
+                     tolerance * 2.5
+                 )
+
+            float neckline =
+                 (
+                     leftNeck +
+                     rightNeck
+                 ) / 2.0
+
+
+            float candidate =
+                 68.0
+                 + shoulderSimilarity * 0.18
+                 + neckSimilarity * 0.08
+
+            candidate :=
+                 math.min(
+                     candidate,
+                     98.0
+                 )
+
+
+            if candidate > patternScore
+
+                patternCode := 4
+                patternBias := 1
+                patternScore := candidate
+
+                patternState :=
+                     c > neckline
+                     ? 2
+                     : 1
+
+
+    // ========================================================================
+    // TRIANGLE STRUCTURES
+    // ========================================================================
+
+    float top3 =
+         haveHighs
+         ? math.max(
+             h0,
+             math.max(h1, h2)
+         )
+         : na
+
+
+    float bottom3 =
+         haveLows
+         ? math.min(
+             l0,
+             math.min(l1, l2)
+         )
+         : na
+
+
+    // ========================================================================
+    // 5. ASCENDING TRIANGLE
+    // ========================================================================
+
+    bool ascendingTriangle =
+
+         detectTriangles
+         and highsFlat
+         and lowsRising
+         and compression
+
+
+    if ascendingTriangle
+
+        float topQuality =
+
+             (
+                 f_similarity(
+                     h0,
+                     h1,
+                     tolerance
+                 )
+
+                 +
+
+                 f_similarity(
+                     h1,
+                     h2,
+                     tolerance
+                 )
+             ) / 2.0
+
+
+        float candidate =
+             70.0 +
+             topQuality * 0.20
+
+        candidate :=
+             math.min(
+                 candidate,
+                 94.0
+             )
+
+
+        if candidate > patternScore
+
+            patternCode := 5
+            patternBias := 1
+            patternScore := candidate
+
+            patternState :=
+                 c > top3
+                 ? 2
+                 : 1
+
+
+    // ========================================================================
+    // 6. DESCENDING TRIANGLE
+    // ========================================================================
+
+    bool descendingTriangle =
+
+         detectTriangles
+         and lowsFlat
+         and highsFalling
+         and compression
+
+
+    if descendingTriangle
+
+        float bottomQuality =
+
+             (
+                 f_similarity(
+                     l0,
+                     l1,
+                     tolerance
+                 )
+
+                 +
+
+                 f_similarity(
+                     l1,
+                     l2,
+                     tolerance
+                 )
+             ) / 2.0
+
+
+        float candidate =
+             70.0 +
+             bottomQuality * 0.20
+
+        candidate :=
+             math.min(
+                 candidate,
+                 94.0
+             )
+
+
+        if candidate > patternScore
+
+            patternCode := 6
+            patternBias := -1
+            patternScore := candidate
+
+            patternState :=
+                 c < bottom3
+                 ? 2
+                 : 1
+
+
+    // ========================================================================
+    // 7. SYMMETRICAL TRIANGLE
+    // ========================================================================
+
+    bool symmetricalTriangle =
+
+         detectTriangles
+         and highsFalling
+         and lowsRising
+         and compression
+
+
+    if symmetricalTriangle
+
+        int bias =
+             c > top3
+             ? 1
+             : c < bottom3
+             ? -1
+             : 0
+
+        int state =
+             bias != 0
+             ? 2
+             : 1
+
+
+        float candidate = 78.0
+
+        if candidate > patternScore
+
+            patternCode := 7
+            patternBias := bias
+            patternScore := candidate
+            patternState := state
+
+
+    // ========================================================================
+    // 8. RISING WEDGE
+    // ========================================================================
+
+    bool risingWedge =
+
+         detectWedges
+         and highsRising
+         and lowsRising
+
+         and not na(highSlope)
+         and not na(lowSlope)
+
+         and highSlope > 0
+         and lowSlope > 0
+
+         // Lower trendline rising faster = convergence.
+         and lowSlope > highSlope * 1.05
+
+
+    if risingWedge
+
+        float candidate = 79.0
+
+        if candidate > patternScore
+
+            patternCode := 8
+            patternBias := -1
+            patternScore := candidate
+
+            patternState :=
+                 c < l0
+                 ? 2
+                 : 1
+
+
+    // ========================================================================
+    // 9. FALLING WEDGE
+    // ========================================================================
+
+    bool fallingWedge =
+
+         detectWedges
+         and highsFalling
+         and lowsFalling
+
+         and not na(highSlope)
+         and not na(lowSlope)
+
+         and highSlope < 0
+         and lowSlope < 0
+
+         // Upper trendline falling faster = convergence.
+         and highSlope < lowSlope * 1.05
+
+
+    if fallingWedge
+
+        float candidate = 79.0
+
+        if candidate > patternScore
+
+            patternCode := 9
+            patternBias := 1
+            patternScore := candidate
+
+            patternState :=
+                 c > h0
+                 ? 2
+                 : 1
+
+
+    // ========================================================================
+    // FLAG / PENNANT IMPULSE
+    // ========================================================================
+
+    float impulseEnd =
+         close[
+             flagBars +
+             sourceOffset
+         ]
+
+    float impulseStart =
+         close[
+             flagBars +
+             impulseBars +
+             sourceOffset
+         ]
+
+    float impulseAtrValue =
+         ta.atr(14)[
+             flagBars +
+             sourceOffset
+         ]
+
+
+    bool impulseUp =
+
+         not na(impulseStart)
+         and not na(impulseEnd)
+
+         and (
+             impulseEnd -
+             impulseStart
+         ) > impulseAtrValue * impulseATR
+
+
+    bool impulseDown =
+
+         not na(impulseStart)
+         and not na(impulseEnd)
+
+         and (
+             impulseStart -
+             impulseEnd
+         ) > impulseAtrValue * impulseATR
+
+
+    // ========================================================================
+    // 10. BULL FLAG
+    // ========================================================================
+
+    bool bullFlag =
+
+         detectFlags
+         and impulseUp
+
+         and highsFalling
+         and lowsFalling
+
+         and parallelScore >= 0.55
+
+         and not symmetricalTriangle
+
+
+    if bullFlag
+
+        float candidate =
+             82.0 +
+             parallelScore * 8.0
+
+        candidate :=
+             math.min(
+                 candidate,
+                 94.0
+             )
+
+
+        if candidate > patternScore
+
+            patternCode := 10
+            patternBias := 1
+            patternScore := candidate
+
+            patternState :=
+                 c > h0
+                 ? 2
+                 : 1
+
+
+    // ========================================================================
+    // 11. BEAR FLAG
+    // ========================================================================
+
+    bool bearFlag =
+
+         detectFlags
+         and impulseDown
+
+         and highsRising
+         and lowsRising
+
+         and parallelScore >= 0.55
+
+         and not symmetricalTriangle
+
+
+    if bearFlag
+
+        float candidate =
+             82.0 +
+             parallelScore * 8.0
+
+        candidate :=
+             math.min(
+                 candidate,
+                 94.0
+             )
+
+
+        if candidate > patternScore
+
+            patternCode := 11
+            patternBias := -1
+            patternScore := candidate
+
+            patternState :=
+                 c < l0
+                 ? 2
+                 : 1
+
+
+    // ========================================================================
+    // 12. BULL PENNANT
+    // ========================================================================
+
+    bool bullPennant =
+
+         detectFlags
+         and impulseUp
+         and symmetricalTriangle
+
+
+    if bullPennant
+
+        float candidate = 90.0
+
+        if candidate > patternScore
+
+            patternCode := 12
+            patternBias := 1
+            patternScore := candidate
+
+            patternState :=
+                 c > top3
+                 ? 2
+                 : 1
+
+
+    // ========================================================================
+    // 13. BEAR PENNANT
+    // ========================================================================
+
+    bool bearPennant =
+
+         detectFlags
+         and impulseDown
+         and symmetricalTriangle
+
+
+    if bearPennant
+
+        float candidate = 90.0
+
+        if candidate > patternScore
+
+            patternCode := 13
+            patternBias := -1
+            patternScore := candidate
+
+            patternState :=
+                 c < bottom3
+                 ? 2
+                 : 1
+
+
+    // ========================================================================
+    // 14. RECTANGLE
+    // ========================================================================
+
+    bool rectangle =
+
+         detectChannels
+         and highsFlat
+         and lowsFlat
+
+
+    if rectangle
+
+        int bias =
+             c > top3
+             ? 1
+             : c < bottom3
+             ? -1
+             : 0
+
+
+        int state =
+             bias != 0
+             ? 2
+             : 1
+
+
+        float candidate = 76.0
+
+        if candidate > patternScore
+
+            patternCode := 14
+            patternBias := bias
+            patternScore := candidate
+            patternState := state
+
+
+    // ========================================================================
+    // 15. RISING CHANNEL
+    // ========================================================================
+
+    bool risingChannel =
+
+         detectChannels
+
+         and highsRising
+         and lowsRising
+
+         and parallelScore >= 0.65
+
+         and not risingWedge
+
+
+    if risingChannel
+
+        float candidate =
+             67.0 +
+             parallelScore * 12.0
+
+        candidate :=
+             math.min(
+                 candidate,
+                 84.0
+             )
+
+
+        if candidate > patternScore
+
+            patternCode := 15
+            patternBias := 1
+            patternScore := candidate
+            patternState := 1
+
+
+    // ========================================================================
+    // 16. FALLING CHANNEL
+    // ========================================================================
+
+    bool fallingChannel =
+
+         detectChannels
+
+         and highsFalling
+         and lowsFalling
+
+         and parallelScore >= 0.65
+
+         and not fallingWedge
+
+
+    if fallingChannel
+
+        float candidate =
+             67.0 +
+             parallelScore * 12.0
+
+        candidate :=
+             math.min(
+                 candidate,
+                 84.0
+             )
+
+
+        if candidate > patternScore
+
+            patternCode := 16
+            patternBias := -1
+            patternScore := candidate
+            patternState := 1
+
+
+    // ========================================================================
+    // RETURN
+    // ========================================================================
+
+    [patternCode,patternBias,patternScore,patternState]
+
+
+// ============================================================================
+// MULTI-TIMEFRAME REQUESTS
+// ============================================================================
+
+// Using offset 1 + lookahead_on provides last completed source candle.
+// Offset 0 + lookahead_off allows developing source candle information.
+
+int sourceOffset =
+     confirmedOnly
+     ? 1
+     : 0
+
+
+[c1, b1, q1, s1] = request.security(
+     syminfo.tickerid,
+     tf1,
+     f_detect(sourceOffset),
+     gaps = barmerge.gaps_off,
+     lookahead =
+         confirmedOnly
+         ? barmerge.lookahead_on
+         : barmerge.lookahead_off
+ )
+
+
+[c2, b2, q2, s2] = request.security(
+     syminfo.tickerid,
+     tf2,
+     f_detect(sourceOffset),
+     gaps = barmerge.gaps_off,
+     lookahead =
+         confirmedOnly
+         ? barmerge.lookahead_on
+         : barmerge.lookahead_off
+ )
+
+
+[c3, b3, q3, s3] = request.security(
+     syminfo.tickerid,
+     tf3,
+     f_detect(sourceOffset),
+     gaps = barmerge.gaps_off,
+     lookahead =
+         confirmedOnly
+         ? barmerge.lookahead_on
+         : barmerge.lookahead_off
+ )
+
+
+// ============================================================================
+// QUALITY FILTER
+// ============================================================================
+
+int code1 =
+     q1 >= minimumScore
+     ? c1
+     : 0
+
+int code2 =
+     q2 >= minimumScore
+     ? c2
+     : 0
+
+int code3 =
+     q3 >= minimumScore
+     ? c3
+     : 0
+
+
+int bias1 =
+     code1 != 0
+     ? b1
+     : 0
+
+int bias2 =
+     code2 != 0
+     ? b2
+     : 0
+
+int bias3 =
+     code3 != 0
+     ? b3
+     : 0
+
+
+int state1 =
+     code1 != 0
+     ? s1
+     : 0
+
+int state2 =
+     code2 != 0
+     ? s2
+     : 0
+
+int state3 =
+     code3 != 0
+     ? s3
+     : 0
+
+
+// ============================================================================
+// CONFLUENCE ENGINE
+// ============================================================================
+
+bool includeForming =
+     confluenceMode ==
+     "Forming + confirmed"
+
+
+bool eligible1 =
+
+     code1 != 0
+
+     and (
+         includeForming
+         or state1 == 2
+     )
+
+
+bool eligible2 =
+
+     code2 != 0
+
+     and (
+         includeForming
+         or state2 == 2
+     )
+
+
+bool eligible3 =
+
+     code3 != 0
+
+     and (
+         includeForming
+         or state3 == 2
+     )
+
+
+// ---------------------------------------------------------------------------
+// Bullish vote count
+// ---------------------------------------------------------------------------
+
+int bullCount =
+
+     (
+         eligible1 and bias1 == 1
+         ? 1
+         : 0
+     )
+
+     +
+
+     (
+         eligible2 and bias2 == 1
+         ? 1
+         : 0
+     )
+
+     +
+
+     (
+         eligible3 and bias3 == 1
+         ? 1
+         : 0
+     )
+
+
+// ---------------------------------------------------------------------------
+// Bearish vote count
+// ---------------------------------------------------------------------------
+
+int bearCount =
+
+     (
+         eligible1 and bias1 == -1
+         ? 1
+         : 0
+     )
+
+     +
+
+     (
+         eligible2 and bias2 == -1
+         ? 1
+         : 0
+     )
+
+     +
+
+     (
+         eligible3 and bias3 == -1
+         ? 1
+         : 0
+     )
+
+
+bool bullishConfluence =
+     bullCount >= minimumAgreement
+
+
+bool bearishConfluence =
+     bearCount >= minimumAgreement
+
+
+bool conflict =
+     bullCount > 0
+     and bearCount > 0
+
+
+// ============================================================================
+// CONFLUENCE SCORE
+// ============================================================================
+
+float bullQualityTotal =
+
+     (
+         eligible1 and bias1 == 1
+         ? q1
+         : 0
+     )
+
+     +
+
+     (
+         eligible2 and bias2 == 1
+         ? q2
+         : 0
+     )
+
+     +
+
+     (
+         eligible3 and bias3 == 1
+         ? q3
+         : 0
+     )
+
+
+float bearQualityTotal =
+
+     (
+         eligible1 and bias1 == -1
+         ? q1
+         : 0
+     )
+
+     +
+
+     (
+         eligible2 and bias2 == -1
+         ? q2
+         : 0
+     )
+
+     +
+
+     (
+         eligible3 and bias3 == -1
+         ? q3
+         : 0
+     )
+
+
+float bullQuality =
+     bullCount > 0
+     ? bullQualityTotal / bullCount
+     : 0
+
+
+float bearQuality =
+     bearCount > 0
+     ? bearQualityTotal / bearCount
+     : 0
+
+
+// ============================================================================
+// NEW CONFLUENCE EVENT
+// ============================================================================
+
+bool newBullishConfluence =
+     bullishConfluence
+     and not bullishConfluence[1]
+
+
+bool newBearishConfluence =
+     bearishConfluence
+     and not bearishConfluence[1]
+
+
+// ============================================================================
+// CHART SIGNALS
+// ============================================================================
+
+plotshape(
+     showSignals
+     and newBullishConfluence
+     and not conflict,
+
+     title = "Bullish MTF Confluence",
+
+     style = shape.labelup,
+
+     location = location.belowbar,
+
+     text = "MTF\nBULL",
+
+     color = color.new(
+         color.green,
+         0
+     ),
+
+     textcolor = color.white,
+
+     size = size.small
+ )
+
+
+plotshape(
+     showSignals
+     and newBearishConfluence
+     and not conflict,
+
+     title = "Bearish MTF Confluence",
+
+     style = shape.labeldown,
+
+     location = location.abovebar,
+
+     text = "MTF\nBEAR",
+
+     color = color.new(
+         color.red,
+         0
+     ),
+
+     textcolor = color.white,
+
+     size = size.small
+ )
+
+
+// ============================================================================
+// BACKGROUND CONFLUENCE
+// ============================================================================
+
+color confluenceBackground =
+
+     conflict
+
+     ? color.new(
+         color.orange,
+         90
+     )
+
+     : bullishConfluence
+
+     ? color.new(
+         color.green,
+         92
+     )
+
+     : bearishConfluence
+
+     ? color.new(
+         color.red,
+         92
+     )
+
+     : na
+
+
+bgcolor(
+     highlightConfluence
+     ? confluenceBackground
+     : na
+ )
+
+
+// ============================================================================
+// LIVE PATTERN LABEL TEXT
+// ============================================================================
+
+f_liveText(
+     string tf,
+     int code,
+     int bias,
+     int state,
+     float score
+ ) =>
+
+    string scoreText =
+         code != 0
+         ? str.tostring(math.round(score))
+         : "-"
+
+    tf
+     + "  "
+     + f_biasIcon(bias)
+     + "  "
+     + f_patternName(code)
+     + " | "
+     + f_stateText(state)
+     + " | Q:"
+     + scoreText
+
+
+// ============================================================================
+// LIVE CHART LABELS
+// ============================================================================
+
+var label tf1Label = na
+var label tf2Label = na
+var label tf3Label = na
+
+
+if barstate.islast and showLabels
+
+    float spacing =
+         ta.atr(14) * 0.45
+
+
+    if na(tf1Label)
+
+        tf1Label :=
+             label.new(
+                 bar_index,
+                 high + spacing * 3,
+                 "",
+                 xloc = xloc.bar_index,
+                 yloc = yloc.price,
+                 style = label.style_label_left,
+                 textcolor = color.white
+             )
+
+
+    if na(tf2Label)
+
+        tf2Label :=
+             label.new(
+                 bar_index,
+                 high + spacing * 2,
+                 "",
+                 xloc = xloc.bar_index,
+                 yloc = yloc.price,
+                 style = label.style_label_left,
+                 textcolor = color.white
+             )
+
+
+    if na(tf3Label)
+
+        tf3Label :=
+             label.new(
+                 bar_index,
+                 high + spacing,
+                 "",
+                 xloc = xloc.bar_index,
+                 yloc = yloc.price,
+                 style = label.style_label_left,
+                 textcolor = color.white
+             )
+
+
+    label.set_xy(
+         tf1Label,
+         bar_index,
+         high + spacing * 3
+     )
+
+    label.set_xy(
+         tf2Label,
+         bar_index,
+         high + spacing * 2
+     )
+
+    label.set_xy(
+         tf3Label,
+         bar_index,
+         high + spacing
+     )
+
+
+    label.set_text(
+         tf1Label,
+         f_liveText(
+             tf1,
+             code1,
+             bias1,
+             state1,
+             q1
+         )
+     )
+
+    label.set_text(
+         tf2Label,
+         f_liveText(
+             tf2,
+             code2,
+             bias2,
+             state2,
+             q2
+         )
+     )
+
+    label.set_text(
+         tf3Label,
+         f_liveText(
+             tf3,
+             code3,
+             bias3,
+             state3,
+             q3
+         )
+     )
+
+
+    label.set_color(
+         tf1Label,
+         f_biasColor(bias1)
+     )
+
+    label.set_color(
+         tf2Label,
+         f_biasColor(bias2)
+     )
+
+    label.set_color(
+         tf3Label,
+         f_biasColor(bias3)
+     )
+
+
+// ============================================================================
+// DASHBOARD
+// ============================================================================
+
+// Dashboard colours
+color dashBg        = color.new(color.black, 15)
+color dashHeaderBg  = color.new(color.gray, 45)
+color dashText      = color.white
+color dashBorder    = color.new(color.gray, 40)
+
+var table dashboard =     table.new(
+        position.top_right,
+        5,
+        5,
+        bgcolor = dashBg,
+        frame_color = dashBorder,
+        frame_width = 1,
+        border_color = dashBorder,
+        border_width = 1
+    )
+
+if barstate.islast and showDashboard
+
+    // ========================================================================
+    // HEADER
+    // ========================================================================
+
+    table.cell(
+        dashboard,
+        0,
+        0,
+        "TF",
+        bgcolor = dashHeaderBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        1,
+        0,
+        "PATTERN",
+        bgcolor = dashHeaderBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        2,
+        0,
+        "BIAS",
+        bgcolor = dashHeaderBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        3,
+        0,
+        "STATE",
+        bgcolor = dashHeaderBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        4,
+        0,
+        "Q",
+        bgcolor = dashHeaderBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+
+    // ========================================================================
+    // TIMEFRAME 1
+    // ========================================================================
+
+    table.cell(
+        dashboard,
+        0,
+        1,
+        tf1,
+        bgcolor = dashBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        1,
+        1,
+        f_patternName(code1),
+        bgcolor = dashBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        2,
+        1,
+        f_biasText(bias1),
+        bgcolor = dashBg,
+        text_color = f_biasColor(bias1),
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        3,
+        1,
+        f_stateText(state1),
+        bgcolor = dashBg,
+        text_color =
+            state1 == 2
+            ? color.lime
+            : state1 == 1
+            ? color.orange
+            : color.gray,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        4,
+        1,
+        code1 != 0
+        ? str.tostring(math.round(q1))
+        : "-",
+        bgcolor = dashBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+
+    // ========================================================================
+    // TIMEFRAME 2
+    // ========================================================================
+
+    table.cell(
+        dashboard,
+        0,
+        2,
+        tf2,
+        bgcolor = dashBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        1,
+        2,
+        f_patternName(code2),
+        bgcolor = dashBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        2,
+        2,
+        f_biasText(bias2),
+        bgcolor = dashBg,
+        text_color = f_biasColor(bias2),
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        3,
+        2,
+        f_stateText(state2),
+        bgcolor = dashBg,
+        text_color =
+            state2 == 2
+            ? color.lime
+            : state2 == 1
+            ? color.orange
+            : color.gray,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        4,
+        2,
+        code2 != 0
+        ? str.tostring(math.round(q2))
+        : "-",
+        bgcolor = dashBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+
+    // ========================================================================
+    // TIMEFRAME 3
+    // ========================================================================
+
+    table.cell(
+        dashboard,
+        0,
+        3,
+        tf3,
+        bgcolor = dashBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        1,
+        3,
+        f_patternName(code3),
+        bgcolor = dashBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        2,
+        3,
+        f_biasText(bias3),
+        bgcolor = dashBg,
+        text_color = f_biasColor(bias3),
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        3,
+        3,
+        f_stateText(state3),
+        bgcolor = dashBg,
+        text_color =
+            state3 == 2
+            ? color.lime
+            : state3 == 1
+            ? color.orange
+            : color.gray,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        4,
+        3,
+        code3 != 0
+        ? str.tostring(math.round(q3))
+        : "-",
+        bgcolor = dashBg,
+        text_color = dashText,
+        text_size = size.small
+    )
+
+
+    // ========================================================================
+    // MTF SUMMARY
+    // ========================================================================
+
+    string mtfBias = conflict ? "CONFLICT" : bullishConfluence ? "BULLISH" : bearishConfluence ? "BEARISH" : "NO ALIGNMENT"
+
+
+    color mtfColor = conflict ? color.orange : bullishConfluence ? color.green : bearishConfluence ? color.red : color.gray
+
+
+    float activeQuality = bullishConfluence ? bullQuality : bearishConfluence ? bearQuality : 0
+
+
+    color mtfBg = color.new(
+            mtfColor,
+            55
+        )
+
+
+    table.cell(
+        dashboard,
+        0,
+        4,
+        "MTF",
+        bgcolor = mtfBg,
+        text_color = color.white,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        1,
+        4,
+        str.tostring(bullCount)
+        + " Bull / "
+        + str.tostring(bearCount)
+        + " Bear",
+        bgcolor = mtfBg,
+        text_color = color.white,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        2,
+        4,
+        mtfBias,
+        bgcolor = mtfBg,
+        text_color = color.white,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        3,
+        4,
+        bullishConfluence or bearishConfluence
+        ? str.tostring(
+            math.max(
+                bullCount,
+                bearCount
+            )
+        ) + "/3"
+        : "-",
+        bgcolor = mtfBg,
+        text_color = color.white,
+        text_size = size.small
+    )
+
+    table.cell(
+        dashboard,
+        4,
+        4,
+        activeQuality > 0
+        ? str.tostring(
+            math.round(
+                activeQuality
+            )
+        )
+        : "-",
+        bgcolor = mtfBg,
+        text_color = color.white,
+        text_size = size.small
+    )
+
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(
+     newBullishConfluence
+     and not conflict,
+
+     title = "MTF Bullish Pattern Confluence",
+
+     message =
+         "MTF Pattern Matrix: Bullish pattern confluence detected."
+ )
+
+
+alertcondition(
+     newBearishConfluence
+     and not conflict,
+
+     title = "MTF Bearish Pattern Confluence",
+
+     message =
+         "MTF Pattern Matrix: Bearish pattern confluence detected."
+ )
